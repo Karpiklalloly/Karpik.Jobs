@@ -25,7 +25,7 @@ class Program
             var was = GC.GetTotalMemory(false);
             sw.Restart();
 
-            Console.WriteLine("Итерация " + i);
+            Console.WriteLine("Iteration " + i);
 
             var initAHandle = scheduler.EnqueueParallel(index => { arrayA[index] = 10 + index; }, count, batchSize);
 
