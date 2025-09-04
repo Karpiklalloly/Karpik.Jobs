@@ -12,7 +12,7 @@ class Program
     {
         var scheduler = new JobSystem(Environment.ProcessorCount);
         Console.WriteLine($"System has {Environment.ProcessorCount} threads.");
-        Stopwatch sw = new Stopwatch();
+        var sw = new Stopwatch();
         long time = 0;
         const int iterations = 100;
         for (int i = 0; i < iterations; i++)
@@ -20,7 +20,7 @@ class Program
             using var arrayA = new SimpleNativeArray<int>(count);
             using var arrayB = new SimpleNativeArray<int>(count);
             using var arrayC_Result = new SimpleNativeArray<long>(count);
-            var finalSum = new long();
+            var finalSum = 0L;
 
             var was = GC.GetTotalMemory(false);
             sw.Restart();

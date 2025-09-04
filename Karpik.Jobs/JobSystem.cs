@@ -50,9 +50,12 @@ public class JobSystem
     [StructLayout(LayoutKind.Explicit, Size = CacheLineSize * 2)]
     private class ThreadState
     {
-        [FieldOffset(CacheLineSize)] public readonly int ThreadId;
-        [FieldOffset(CacheLineSize * 2 - 16)] public readonly ConcurrentQueue<JobWrapper> Queue;
-        [FieldOffset(CacheLineSize * 2 - 8)] public volatile bool IsWorking;
+        [FieldOffset(CacheLineSize)]
+        public readonly int ThreadId;
+        [FieldOffset(CacheLineSize * 2 - 16)]
+        public readonly ConcurrentQueue<JobWrapper> Queue;
+        [FieldOffset(CacheLineSize * 2 - 8)]
+        public volatile bool IsWorking;
 
         public ThreadState(int threadId)
         {

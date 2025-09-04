@@ -5,7 +5,7 @@ internal sealed class JobCompletion
     private volatile int _remaining;
     private readonly ManualResetEventSlim _event;
     private Action _continuation;
-    private readonly object _lock = new object();
+    private readonly Lock _lock = new();
     public bool IsCompleted => Volatile.Read(ref _remaining) == 0;
 
     public JobCompletion(int initialCount)

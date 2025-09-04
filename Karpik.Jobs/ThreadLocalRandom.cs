@@ -6,7 +6,7 @@ internal static class ThreadLocalRandom
 
     public static int Next(int min, int max)
     {
-        if (_local == null) _local = new Random(UnsafeAdditiveHash(Thread.CurrentThread.ManagedThreadId));
+        if (_local == null) _local = new Random(UnsafeAdditiveHash(Environment.CurrentManagedThreadId));
         return _local.Next(min, max);
     }
 
