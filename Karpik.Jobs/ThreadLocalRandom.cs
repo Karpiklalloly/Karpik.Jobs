@@ -2,7 +2,7 @@
 
 internal static class ThreadLocalRandom
 {
-    [ThreadStatic] private static Random _local;
+    [ThreadStatic] private static Random? _local;
 
     public static int Next(int min, int max)
     {
