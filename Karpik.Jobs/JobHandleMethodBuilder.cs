@@ -10,7 +10,14 @@ public struct JobHandleMethodBuilder
     
     public static JobHandleMethodBuilder Create()
     {
-        return new JobHandleMethodBuilder();
+        var completion = new JobCompletion(1);
+        var cts = new CancellationTokenSource();
+        return new JobHandleMethodBuilder
+        {
+            _completion = completion,
+            _cts = cts,
+            _jobHandle = new JobHandle(completion, cts)
+        };
     }
 
     public JobHandle Task
@@ -86,7 +93,17 @@ public struct JobHandleMethodBuilder<T>
     private CancellationTokenSource _cts;
     private JobHandle<T> _jobHandle;
 
-    public static JobHandleMethodBuilder<T> Create() => new();
+    public static JobHandleMethodBuilder<T> Create()
+    {
+        var completion = new JobCompletion<T>(1);
+        var cts = new CancellationTokenSource();
+        return new JobHandleMethodBuilder<T>
+        {
+            _completion = completion,
+            _cts = cts,
+            _jobHandle = new JobHandle<T>(completion, cts)
+        };
+    }
 
     public JobHandle<T> Task
     {
