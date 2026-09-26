@@ -18,6 +18,7 @@ public class JobSystem
     private readonly int _workerCount;
     private volatile bool _isRunning;
     private readonly ObjectPool<JobWrapper> _jobWrapperPool;
+    private readonly Action<Exception>? _onJobError;
 
     private int _enqueueIndex = 0;
     private int _outstandingJobs = 0;
@@ -25,8 +26,9 @@ public class JobSystem
     private readonly SemaphoreSlim _workSemaphore = new SemaphoreSlim(0);
 
     [AllocatingCompatibility("Creates managed worker threads, thread state arrays, semaphores, wrapper pool metadata, and ConcurrentQueue instances.")]
-    public JobSystem(int workerCount = -1, string prefix = "JobWorker")
+    public JobSystem(int workerCount = -1, string prefix = "JobWorker", Action<Exception>? onJobError = null)
     {
+        _onJobError = onJobError;
         _workerCount = workerCount == -1
             ? Math.Min(Environment.ProcessorCount, MaxThreads)
             : Math.Min(workerCount, MaxThreads);
@@ -133,11 +135,8 @@ public class JobSystem
         }
         catch (Exception ex)
         {
-            var color = Console.ForegroundColor;
-            Console.ForegroundColor = ConsoleColor.DarkMagenta;
-            Console.WriteLine($"[ERROR] Job failed: {ex}");
-            Console.ForegroundColor = color;
             wrapper.Completion?.SetException(ex);
+            ReportJobError(ex);
         }
         finally
         {
@@ -297,11 +296,8 @@ public class JobSystem
             }
             catch (Exception ex)
             {
-                var color = Console.ForegroundColor;
-                Console.ForegroundColor = ConsoleColor.DarkMagenta;
-                Console.WriteLine($"[ERROR] Job failed: {ex}");
-                Console.ForegroundColor = color;
                 completion.SetException(ex);
+                ReportJobError(ex);
             }
         };
 
@@ -390,4 +386,25 @@ public class JobSystem
     }
 
     public void Dispose() => Shutdown();
+
+    private void ReportJobError(Exception exception)
+    {
+        if (_onJobError is not null)
+        {
+            try
+            {
+                _onJobError(exception);
+            }
+            catch
+            {
+                // A reporting failure must not replace the job failure or strand its completion.
+            }
+            return;
+        }
+
+        var color = Console.ForegroundColor;
+        Console.ForegroundColor = ConsoleColor.DarkMagenta;
+        Console.WriteLine($"[ERROR] Job failed: {exception}");
+        Console.ForegroundColor = color;
+    }
 }
