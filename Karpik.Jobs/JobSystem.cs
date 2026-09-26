@@ -22,6 +22,7 @@ public class JobSystem
 
     private int _enqueueIndex = 0;
     private int _outstandingJobs = 0;
+    private int _admissionState; // Sign bit closes admission; remaining bits count active Enqueue calls.
 
     private readonly SemaphoreSlim _workSemaphore = new SemaphoreSlim(0);
 
@@ -153,8 +154,20 @@ public class JobSystem
 
     private JobHandle EnqueueInternal(Action job, Span<JobHandle> dependencies)
     {
-        if (!_isRunning) return default;
+        if (!TryEnterEnqueue()) return default;
+        try
+        {
+            return EnqueueAccepted(job, dependencies);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _admissionState);
+        }
+    }
 
+    private JobHandle EnqueueAccepted(Action job, Span<JobHandle> dependencies)
+    {
+        JobCompletion? dependenciesCompletion = RegisterDependencies(dependencies);
         var completion = new JobCompletion(1);
         var cts = new CancellationTokenSource();
         var wrapper = _jobWrapperPool.Rent();
@@ -165,54 +178,46 @@ public class JobSystem
 
         Action enqueueAction = () =>
         {
-            Interlocked.Increment(ref _outstandingJobs);
             int targetThread = (Interlocked.Increment(ref _enqueueIndex) & int.MaxValue) % _workerCount;
             _threadStates[targetThread].Queue.Enqueue(wrapper);
 
             _workSemaphore.Release();
         };
 
-        if (dependencies.IsEmpty || dependencies.Length == 0)
-        {
-            enqueueAction();
-        }
-        else
-        {
-            var dependenciesCompletion = new JobCompletion(dependencies.Length);
-            foreach (var dependency in dependencies)
-            {
-                if (dependency.Completion is null)
-                {
-                    dependenciesCompletion.Signal();
-                }
-                else
-                {
-                    dependency.Completion.AddContinuation(() => dependenciesCompletion.Signal());
-                }
-            }
-
-            dependenciesCompletion.AddContinuation(enqueueAction);
-        }
+        Interlocked.Increment(ref _outstandingJobs);
+        if (dependenciesCompletion is null) enqueueAction();
+        else dependenciesCompletion.AddContinuation(enqueueAction);
 
         return new JobHandle(completion, cts);
     }
 
     private JobHandle EnqueueParallelInternal(Action<int> action, int size, int batchSize, Span<JobHandle> dependencies)
     {
-        if (!_isRunning || size <= 0) return default;
+        if (size <= 0 || !TryEnterEnqueue()) return default;
+        try
+        {
+            return EnqueueParallelAccepted(action, size, batchSize, dependencies);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _admissionState);
+        }
+    }
+
+    private JobHandle EnqueueParallelAccepted(Action<int> action, int size, int batchSize, Span<JobHandle> dependencies)
+    {
+        JobCompletion? dependenciesCompletion = RegisterDependencies(dependencies);
         if (batchSize <= 0) batchSize = Math.Max(1, Math.Min(DefaultBatchSize, size / _workerCount));
-        int batchCount = (size + batchSize - 1) / batchSize;
+        int batchCount = 1 + (size - 1) / batchSize;
         var cts = new CancellationTokenSource();
         var completion = new JobCompletion(batchCount);
 
         Action enqueueBatches = () =>
         {
-            Interlocked.Add(ref _outstandingJobs, batchCount);
-
             for (int i = 0; i < batchCount; i++)
             {
                 int startIndex = i * batchSize;
-                int endIndex = Math.Min(startIndex + batchSize, size);
+                int endIndex = startIndex + Math.Min(batchSize, size - startIndex);
                 var wrapper = _jobWrapperPool.Rent();
                 wrapper.ParallelAction = (start, end) =>
                 {
@@ -235,27 +240,9 @@ public class JobSystem
             _workSemaphore.Release(batchCount);
         };
 
-        if (dependencies.IsEmpty || dependencies.Length == 0)
-        {
-            enqueueBatches();
-        }
-        else
-        {
-            var dependenciesCompletion = new JobCompletion(dependencies.Length);
-            foreach (var dependency in dependencies)
-            {
-                if (dependency.Completion is null)
-                {
-                    dependenciesCompletion.Signal();
-                }
-                else
-                {
-                    dependency.Completion.AddContinuation(() => dependenciesCompletion.Signal());
-                }
-            }
-
-            dependenciesCompletion.AddContinuation(enqueueBatches);
-        }
+        Interlocked.Add(ref _outstandingJobs, batchCount);
+        if (dependenciesCompletion is null) enqueueBatches();
+        else dependenciesCompletion.AddContinuation(enqueueBatches);
 
         return new JobHandle(completion, cts);
     }
@@ -280,8 +267,20 @@ public class JobSystem
     [AllocatingCompatibility("Allocates managed typed completion/cancellation state and a delegate result wrapper.")]
     public JobHandle<T> Enqueue<T>(Func<T> job, params Span<JobHandle> dependencies)
     {
-        if (!_isRunning) return default;
+        if (!TryEnterEnqueue()) return default;
+        try
+        {
+            return EnqueueAccepted(job, dependencies);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _admissionState);
+        }
+    }
 
+    private JobHandle<T> EnqueueAccepted<T>(Func<T> job, Span<JobHandle> dependencies)
+    {
+        JobCompletion? dependenciesCompletion = RegisterDependencies(dependencies);
         var completion = new JobCompletion<T>(1);
         var cts = new CancellationTokenSource();
         
@@ -307,32 +306,14 @@ public class JobSystem
 
         Action enqueueAction = () =>
         {
-            Interlocked.Increment(ref _outstandingJobs);
             int targetThread = (Interlocked.Increment(ref _enqueueIndex) & int.MaxValue) % _workerCount;
             _threadStates[targetThread].Queue.Enqueue(wrapper);
             _workSemaphore.Release();
         };
 
-        if (dependencies.IsEmpty || dependencies.Length == 0)
-        {
-            enqueueAction();
-        }
-        else
-        {
-            var dependenciesCompletion = new JobCompletion(dependencies.Length);
-            foreach (var dependency in dependencies)
-            {
-                if (dependency.Completion is null)
-                {
-                    dependenciesCompletion.Signal();
-                }
-                else
-                {
-                    dependency.Completion.AddContinuation(() => dependenciesCompletion.Signal());
-                }
-            }
-            dependenciesCompletion.AddContinuation(enqueueAction);
-        }
+        Interlocked.Increment(ref _outstandingJobs);
+        if (dependenciesCompletion is null) enqueueAction();
+        else dependenciesCompletion.AddContinuation(enqueueAction);
 
         return new JobHandle<T>(completion, cts);
     }
@@ -364,6 +345,35 @@ public class JobSystem
         {
             spinWait.SpinOnce();
         }
+    }
+
+    private static JobCompletion? RegisterDependencies(Span<JobHandle> dependencies)
+    {
+        if (dependencies.IsEmpty) return null;
+        var completion = new JobCompletion(dependencies.Length);
+        foreach (var dependency in dependencies)
+        {
+            if (dependency.Completion is null) completion.Signal();
+            else dependency.Completion.AddContinuation(() => completion.Signal());
+        }
+        return completion;
+    }
+
+    private bool TryEnterEnqueue()
+    {
+        if (!_isRunning) return false;
+        if (Interlocked.Increment(ref _admissionState) >= 0) return true;
+        Interlocked.Decrement(ref _admissionState);
+        return false;
+    }
+
+    internal void DrainAndShutdown()
+    {
+        Interlocked.Or(ref _admissionState, int.MinValue);
+        var spinWait = new SpinWait();
+        while ((Volatile.Read(ref _admissionState) & int.MaxValue) != 0) spinWait.SpinOnce();
+        WaitForCompletion();
+        Shutdown();
     }
 
     public void Shutdown()
