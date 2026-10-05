@@ -61,7 +61,7 @@ public sealed class JobSchedulerWorkerRuntimeTests
         Assert.True(scheduler.TryPublish(second, workerIndex: 0));
 
         WaitUntilCompleted(scheduler, first);
-        WaitUntilCompleted(scheduler, second);
+        WaitUntilCompletedAndReturned(scheduler, second);
 
         Assert.Equal(0, scheduler.ScheduledCount);
 
