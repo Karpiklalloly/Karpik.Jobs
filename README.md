@@ -159,6 +159,8 @@ scheduler.StopWorkers();
 
 Workers use work stealing: an idle worker can take a job from another worker's queue. `workerQueueCapacity` must be a positive power of two. Once `StopWorkers` has been called, the same scheduler instance cannot start its workers again.
 
+Publication, dependency requeue, and manual bottom-end removal use a short `SpinLock` per queue. Stealing from the top remains independent of that lock. Job callbacks and dependency checks run outside the lock; queue operations allocate no managed memory after initialization. Contention can delay producers.
+
 ## Limits and errors
 
 `Schedule` and `ScheduleParallel` throw `InvalidOperationException` when the job cannot be registered. In a game loop, prefer `TrySchedule` and `TryScheduleParallel` when capacity exhaustion is expected:

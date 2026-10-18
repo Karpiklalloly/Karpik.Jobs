@@ -438,18 +438,20 @@ public sealed unsafe class JobScheduler : IDisposable
         }
 
         WorkStealingDeque<ValueJobHandle> localQueue = _workerQueues[workerIndex];
-        if (localQueue.TryPopBottom(out ValueJobHandle localHandle))
+        if (localQueue.TryPopBottom(out ValueJobHandle localHandle) &&
+            TryCompleteOrRequeue(localHandle, localQueue))
         {
-            return TryCompleteOrRequeue(localHandle, localQueue);
+            return true;
         }
 
         for (int offset = 1; offset < WorkerCount; offset++)
         {
             int victimIndex = (workerIndex + offset) % WorkerCount;
             WorkStealingDeque<ValueJobHandle> victimQueue = _workerQueues[victimIndex];
-            if (victimQueue.TryStealTop(out ValueJobHandle stolenHandle))
+            if (victimQueue.TryStealTop(out ValueJobHandle stolenHandle) &&
+                TryCompleteOrRequeue(stolenHandle, victimQueue))
             {
-                return TryCompleteOrRequeue(stolenHandle, victimQueue);
+                return true;
             }
         }
 
@@ -556,9 +558,10 @@ public sealed unsafe class JobScheduler : IDisposable
         for (int i = 0; i < dependencies.Length; i++)
         {
             ValueJobHandle dependency = dependencies[i];
+            // Completion may return the descriptor between the first two status checks.
             if (!dependency.IsValid ||
                 (uint)dependency.Descriptor.Index >= (uint)Capacity ||
-                (!IsCompleted(dependency) && !_descriptors.IsRented(dependency.Descriptor)))
+                (!IsCompleted(dependency) && !_descriptors.IsRented(dependency.Descriptor) && !IsCompleted(dependency)))
             {
                 Interlocked.Increment(ref _invalidDependencyCount);
                 return false;
@@ -641,23 +644,33 @@ public sealed unsafe class JobScheduler : IDisposable
 
     private WorkerRunResult TryRunNextPublished(int workerIndex)
     {
+        WorkerRunResult result = WorkerRunResult.Empty;
         WorkStealingDeque<ValueJobHandle> localQueue = _workerQueues[workerIndex];
         if (localQueue.TryStealTop(out ValueJobHandle localHandle))
         {
-            return TryCompleteOrRequeuePublished(localHandle, localQueue);
+            result = TryCompleteOrRequeuePublished(localHandle, localQueue);
+            if (result == WorkerRunResult.Completed)
+            {
+                return result;
+            }
         }
 
+        // A pending job must not hide its ready dependency in another queue.
         for (int offset = 1; offset < WorkerCount; offset++)
         {
             int victimIndex = (workerIndex + offset) % WorkerCount;
             WorkStealingDeque<ValueJobHandle> victimQueue = _workerQueues[victimIndex];
             if (victimQueue.TryStealTop(out ValueJobHandle stolenHandle))
             {
-                return TryCompleteOrRequeuePublished(stolenHandle, victimQueue);
+                result = TryCompleteOrRequeuePublished(stolenHandle, victimQueue);
+                if (result == WorkerRunResult.Completed)
+                {
+                    return result;
+                }
             }
         }
 
-        return WorkerRunResult.Empty;
+        return result;
     }
 
     private WorkerRunResult TryCompleteOrRequeuePublished(

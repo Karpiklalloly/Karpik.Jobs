@@ -6,6 +6,30 @@ namespace Karpik.Jobs.Tests;
 
 public sealed class JobSchedulerWorkerPublicationTests
 {
+    [Theory]
+    [InlineData(2, 0)]
+    [InlineData(3, 1)]
+    public void TryRunNext_WhenPendingJobPrecedesAnotherQueue_ExecutesReadyDependency(int workerCount, int pendingQueue)
+    {
+        using NativeResult<int> result = new();
+        using JobScheduler scheduler = new(capacity: 2, maxPayloadByteLength: 64,
+            workerCount: workerCount, workerQueueCapacity: 2);
+        WriteResultJob rootJob = new() { Result = result.AsHandle(), Value = 1 };
+        WriteResultJob dependentJob = new() { Result = result.AsHandle(), Value = 2 };
+        ValueJobHandle root = scheduler.Schedule(in rootJob);
+        ValueJobHandle dependent = scheduler.Schedule(in dependentJob, stackalloc[] { root });
+        Assert.True(scheduler.TryPublish(dependent, pendingQueue));
+        Assert.True(scheduler.TryPublish(root, workerCount - 1));
+
+        Assert.True(scheduler.TryRunNext(0));
+        Assert.True(scheduler.IsCompleted(root));
+        Assert.False(scheduler.IsCompleted(dependent));
+        Assert.Equal(1, result.Value);
+        Assert.True(scheduler.TryRunNext(0));
+        Assert.Equal(2, result.Value);
+        Assert.Equal(0, scheduler.ScheduledCount);
+    }
+
     [Fact]
     public void TryPublish_TryRunNext_ExecutesLocalWorkerJob()
     {
