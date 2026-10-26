@@ -8,6 +8,57 @@ namespace Karpik.Jobs.Tests;
 public sealed class JobSchedulerWorkerRuntimeTests
 {
     [Fact]
+    public async Task Workers_RequeueToSameQueue_PreserveAllDependentJobs()
+    {
+        const int dependentCount = 128;
+        using NativeResult<int> result = new();
+        result.Value = 0;
+        using JobScheduler scheduler = new(capacity: dependentCount + 1, maxPayloadByteLength: 64,
+            workerCount: 4, workerQueueCapacity: dependentCount);
+        NoOpJob rootJob = default;
+        IncrementResultJob dependentJob = new() { Result = result.AsHandle() };
+        ValueJobHandle root = scheduler.Schedule(in rootJob);
+        ValueJobHandle[] dependencies = [root];
+        ValueJobHandle[] dependents = new ValueJobHandle[dependentCount];
+        for (int i = 0; i < dependents.Length; i++)
+        {
+            dependents[i] = scheduler.Schedule(in dependentJob, dependencies);
+            Assert.True(scheduler.TryPublish(dependents[i], 0));
+        }
+
+        Assert.True(scheduler.StartWorkers());
+        // Keep the root unpublished while all workers contend on dependency requeue.
+        await Task.Delay(100);
+        Assert.Equal(0, result.Value);
+        Assert.True(scheduler.TryPublish(root, 1));
+        await Task.Run(() => WaitUntilCompletedAndReturned(scheduler, dependents[^1]));
+
+        Assert.Equal(dependentCount, result.Value);
+        Assert.All(dependents, handle => Assert.True(scheduler.IsCompleted(handle)));
+        Assert.Equal(0, scheduler.GetDiagnostics().RequeueOverflowCount);
+        Assert.Equal(0, scheduler.GetDiagnostics().WorkerQueueOverflowCount);
+    }
+
+    [Fact]
+    public void ScheduleDependency_WhileRootCompletes_AcceptsLiveOrCompletedHandle()
+    {
+        using JobScheduler scheduler = new(capacity: 2, maxPayloadByteLength: 64,
+            workerCount: 2, workerQueueCapacity: 2);
+        NoOpJob job = default;
+        Assert.True(scheduler.StartWorkers());
+        Span<ValueJobHandle> dependencies = stackalloc ValueJobHandle[1];
+        for (int iteration = 0; iteration < 1000; iteration++)
+        {
+            ValueJobHandle root = scheduler.Schedule(in job);
+            Assert.True(scheduler.TryPublish(root, 0));
+            dependencies[0] = root;
+            Assert.True(scheduler.TrySchedule(in job, dependencies, out ValueJobHandle dependent));
+            Assert.True(scheduler.TryPublish(dependent, 1));
+            WaitUntilCompletedAndReturned(scheduler, dependent);
+        }
+    }
+
+    [Fact]
     public void StartWorkers_TryPublish_WakesWorkerAndCompletesJob()
     {
         using NativeResult<int> result = new();
@@ -167,6 +218,13 @@ public sealed class JobSchedulerWorkerRuntimeTests
 
             spinWait.SpinOnce();
         }
+    }
+
+    private struct IncrementResultJob : IJob
+    {
+        public NativeResultHandle<int> Result;
+
+        public void Execute() => Interlocked.Increment(ref Result.Value);
     }
 
     private struct NoOpJob : IJob

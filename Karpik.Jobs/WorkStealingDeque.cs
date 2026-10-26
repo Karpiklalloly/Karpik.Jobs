@@ -7,6 +7,7 @@ internal sealed class WorkStealingDeque<T> : IDisposable where T : unmanaged
 {
     private readonly NativeArray<T> _items;
     private readonly int _mask;
+    private SpinLock _bottomLock = new(enableThreadOwnerTracking: false);
     private int _top;
     private int _bottom;
     private bool _isDisposed;
@@ -48,53 +49,71 @@ internal sealed class WorkStealingDeque<T> : IDisposable where T : unmanaged
     public bool TryPushBottom(T item)
     {
         EnsureNotDisposed();
-
-        int bottom = Volatile.Read(ref _bottom);
-        int top = Volatile.Read(ref _top);
-        if (bottom - top >= Capacity)
+        bool lockTaken = false;
+        try
         {
-            return false;
+            // Publication and dependency requeue can write the same worker queue concurrently.
+            _bottomLock.Enter(ref lockTaken);
+            int bottom = Volatile.Read(ref _bottom);
+            int top = Volatile.Read(ref _top);
+            if (bottom - top >= Capacity)
+            {
+                return false;
+            }
+
+            _items[bottom & _mask] = item;
+
+            // Publish the written slot before advancing bottom so thieves never see an uninitialized item.
+            Volatile.Write(ref _bottom, bottom + 1);
+            return true;
         }
-
-        _items[bottom & _mask] = item;
-
-        // Publish the written slot before advancing bottom so thieves never see an uninitialized item.
-        Volatile.Write(ref _bottom, bottom + 1);
-        return true;
+        finally
+        {
+            if (lockTaken) _bottomLock.Exit();
+        }
     }
 
     public bool TryPopBottom(out T item)
     {
         EnsureNotDisposed();
-
-        int bottom = Volatile.Read(ref _bottom) - 1;
-        Volatile.Write(ref _bottom, bottom);
-        int top = Volatile.Read(ref _top);
-        int count = bottom - top;
-
-        if (count < 0)
+        bool lockTaken = false;
+        try
         {
-            Volatile.Write(ref _bottom, top);
+            _bottomLock.Enter(ref lockTaken);
+            int bottom = Volatile.Read(ref _bottom) - 1;
+            // A full fence is required before reading top in the last-item race.
+            Interlocked.Exchange(ref _bottom, bottom);
+            int top = Volatile.Read(ref _top);
+            int count = bottom - top;
+
+            if (count < 0)
+            {
+                Volatile.Write(ref _bottom, top);
+                item = default;
+                return false;
+            }
+
+            item = _items[bottom & _mask];
+            if (count > 0)
+            {
+                return true;
+            }
+
+            // Last item race: owner and thief contend through top. Only the winner keeps the item.
+            if (Interlocked.CompareExchange(ref _top, top + 1, top) == top)
+            {
+                Volatile.Write(ref _bottom, top + 1);
+                return true;
+            }
+
             item = default;
+            Volatile.Write(ref _bottom, top + 1);
             return false;
         }
-
-        item = _items[bottom & _mask];
-        if (count > 0)
+        finally
         {
-            return true;
+            if (lockTaken) _bottomLock.Exit();
         }
-
-        // Last item race: owner and thief contend through top. Only the winner keeps the item.
-        if (Interlocked.CompareExchange(ref _top, top + 1, top) == top)
-        {
-            Volatile.Write(ref _bottom, top + 1);
-            return true;
-        }
-
-        item = default;
-        Volatile.Write(ref _bottom, top + 1);
-        return false;
     }
 
     public bool TryStealTop(out T item)
