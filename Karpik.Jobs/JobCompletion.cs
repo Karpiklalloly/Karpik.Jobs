@@ -1,4 +1,4 @@
-﻿namespace Karpik.Jobs;
+namespace Karpik.Jobs;
 
 internal class JobCompletion
 {
@@ -34,7 +34,8 @@ internal class JobCompletion
     {
         lock (_lock)
         {
-            if (IsCompleted)
+            // A zero counter can precede publication. The awaiter's GetResult waits on this event.
+            if (_event.IsSet)
             {
                 continuation();
             }
