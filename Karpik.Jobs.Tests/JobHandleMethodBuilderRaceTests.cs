@@ -6,6 +6,32 @@ namespace Karpik.Jobs.Tests;
 public sealed class JobHandleMethodBuilderRaceTests
 {
     [Fact]
+    public void AwaitRegistrationCannotRunBeforeTheWaitEventIsPublished()
+    {
+        var source = new JobHandleCompletionSource<int>();
+        var awaiter = source.JobHandle.GetAwaiter();
+        // Force registration into the interval between the final counter decrement and publication under the lock.
+        const System.Reflection.BindingFlags fields = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+        object completion = typeof(JobHandleCompletionSource<int>).GetField("_jobCompletion", fields)!.GetValue(source)!;
+        Type completionType = completion.GetType().BaseType!;
+        var gate = (Lock)completionType.GetField("_lock", fields)!.GetValue(completion)!;
+        var signal = (ManualResetEventSlim)completionType.GetField("_event", fields)!.GetValue(completion)!;
+        int observed = 0;
+        Thread producer = new(() => source.SetResult(42)) { IsBackground = true };
+        Assert.False(awaiter.IsCompleted);
+        using (gate.EnterScope())
+        {
+            producer.Start();
+            Assert.True(SpinWait.SpinUntil(() => awaiter.IsCompleted, TimeSpan.FromSeconds(5)));
+            Assert.False(signal.IsSet);
+            // Avoid making a failing regression hang: GetResult would block here under the producer's lock.
+            awaiter.OnCompleted(() => observed = signal.IsSet ? awaiter.GetResult() : -1);
+        }
+        Assert.True(producer.Join(TimeSpan.FromSeconds(5)));
+        Assert.Equal(42, observed);
+    }
+
+    [Fact]
     public void AsyncJobHandle_CompletesAfterSuspendedContinuationRuns()
     {
         using var releaseContinuation = new ManualResetEventSlim();
